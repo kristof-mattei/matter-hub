@@ -5,30 +5,30 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug executable 'rust-seed'",
+            "name": "Debug executable 'matter-hub'",
             "type": "lldb",
             "request": "launch",
             "cargo": {
-                "args": ["run", "--bin=rust-seed"]
+                "args": ["run", "--bin=matter-hub"]
             },
             "args": [],
             "env": {
                 "RUST_BACKTRACE": "1",
-                "RUST_LOG": "DEBUG,rust_seed=TRACE"
+                "RUST_LOG": "DEBUG,matter_hub=TRACE"
             },
             "internalConsoleOptions": "neverOpen",
             "terminal": "integrated"
         },
         {
-            "name": "Debug unit tests in executable 'rust-seed'",
+            "name": "Debug unit tests in executable 'matter-hub'",
             "type": "lldb",
             "request": "launch",
             "cargo": {
-                "args": ["test", "--bin=rust-seed"]
+                "args": ["test", "--bin=matter-hub"]
             },
             "env": {
                 "RUST_BACKTRACE": "1",
-                "RUST_LOG": "DEBUG,rust_seed=TRACE"
+                "RUST_LOG": "DEBUG,matter_hub=TRACE"
             },
             "internalConsoleOptions": "neverOpen",
             "terminal": "integrated"
@@ -42,7 +42,7 @@
             },
             "env": {
                 "RUST_BACKTRACE": "1",
-                "RUST_LOG": "DEBUG,rust_seed=TRACE"
+                "RUST_LOG": "DEBUG,matter_hub=TRACE"
             },
             "internalConsoleOptions": "neverOpen",
             "terminal": "integrated"
