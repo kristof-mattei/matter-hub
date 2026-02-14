@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  spellcheck:
     name: Spellcheck
     runs-on: ubuntu-latest
     steps:
@@ -71,10 +71,45 @@ jobs:
               exit 1
           fi
 
+      - name: Cache cargo
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        env:
+          CACHE_NAME: cargo
+        with:
+          path: |
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-${{ github.workflow }}-${{ github.job }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-${{ github.workflow }}-
+            ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-
+
+      - name: Set up mold
+        uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
+
+      - name: Set up toolchain
+        shell: bash
+        run: |
+          rm ${HOME}/.cargo/bin/cargo-fmt
+          rm ${HOME}/.cargo/bin/rust-analyzer
+          rm ${HOME}/.cargo/bin/rustfmt
+
+          rustup self update
+          rustup update
+          rustup show active-toolchain || rustup toolchain install
+          rustup show
+
+          cargo --version
+
       - name: Install libclang-dev should cargo-spellcheck be built from source
         shell: bash
         run: |
-          sudo apt-get install libclang-dev
+          sudo apt-get install --no-install-recommends --yes libclang-dev
 
       - name: Install cargo-spellcheck to check the spelling
         uses: taiki-e/install-action@288875dd3d64326724fa6d9593062d9f8ba0b131 # v2.67.30

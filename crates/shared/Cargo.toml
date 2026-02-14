@@ -1,5 +1,5 @@
 [package]
-name = "matter-hub"
+name = "shared"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,15 +10,11 @@ categories.workspace = true
 keywords.workspace = true
 repository.workspace = true
 include.workspace = true
-build = "src/build.rs"
 
 [features]
 default = []
 
 [dependencies]
-color-eyre = "0.6.5"
-mimalloc = { version = "0.1.48", features = ["v3"] }
-pretty_assertions = "1.4.1"
 
 [dev-dependencies]
 

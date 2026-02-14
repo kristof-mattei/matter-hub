@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: |
           has_crate="${{ vars.HAS_CRATE }}"
-          echo "has_crate=${has_crate:-false}" >> ${GITHUB_OUTPUT}
+          echo "has_crate=${has_crate:-false}" >> "${GITHUB_OUTPUT}"
 
   publish-crate:
     name: Publish crate
@@ -59,9 +59,9 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          # notice the `docker-build` suffix, so that it will use the same cache
-          key: ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-docker-build
+          key: ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-${{ github.workflow }}-${{ github.job }}
           restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-${{ github.workflow }}-
             ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-
             ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-
 
