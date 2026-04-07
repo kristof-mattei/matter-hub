@@ -5,18 +5,15 @@ on:
   workflow_dispatch:
     inputs:
       prerelease:
-        description: "Pre-release?"
-        type: boolean
-        default: true
-      force-bump:
-        description: "Force bump?"
+        description: "Pre-release type"
         type: choice
-        default: auto
+        # default: rc
+        default: none
         options:
-          - auto
-          - patch
-          - minor
-          - major
+          - none
+          # - alpha
+          # - beta
+          # - rc
 
 concurrency:
   group: "${{ github.workflow }}"
@@ -48,9 +45,10 @@ jobs:
         with:
           fetch-depth: 0
           show-progress: false
+          token: ${{ secrets.TOKEN_TO_TRIGGER_SUBSEQUENT_WORKFLOWS }}
 
       - name: Install git-cliff to generate changelog & next version number
-        uses: taiki-e/install-action@94cb46f8d6e437890146ffbd78a778b78e623fb2 # v2.74.0
+        uses: taiki-e/install-action@8002e0e61dfa209f5a4071401b4662c95b4e2ead # v2.74.1
         with:
           tool: git-cliff
 
@@ -61,23 +59,43 @@ jobs:
           git config --global user.name github-actions[bot]
           git config --global user.email 41898282+github-actions[bot]@users.noreply.github.com
 
-          version=$(git-cliff --bumped-version --unreleased --bump ${{ inputs.force-bump }} --github-token ${{ secrets.GITHUB_TOKEN }})
+          latest_tag=$(git describe --tags --abbrev=0 || true)
 
-          # Strip any -rc.* suffix git-cliff may have picked up
-          version="${version%%-rc.*}"
+          if [ -n "${latest_tag}" ] && [ -z "$(git log "${latest_tag}..HEAD" --oneline)" ]; then
+            echo "No commits since ${latest_tag}. Nothing to release."
+            exit 1
+          fi
+
+          bump_flag="auto"
+          bumped=$(git-cliff --bumped-version --bump ${bump_flag} --unreleased --github-token ${{ secrets.GITHUB_TOKEN }})
+
+          # If git-cliff didn't bump (e.g. chore/ci only commits), force a patch increment
+          # so we never release the same version as the last tag.
+          if [ "${bumped}" = "${latest_tag}" ]; then
+            bump_flag="patch"
+            bumped=$(git-cliff --bumped-version --bump patch --unreleased --github-token ${{ secrets.GITHUB_TOKEN }})
+            echo "Force bumping to ${bumped}"
+          fi
+
+          version="${bumped}"
+
+          # Strip any pre-release suffix git-cliff may have picked up (keep only vX.Y.Z)
+          [[ "$version" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+) ]] && version="${BASH_REMATCH[1]}"
           echo "version=$version" >> "${GITHUB_OUTPUT}"
 
-          if [ "${{ inputs.prerelease }}" == "true" ]; then
-            # Determine the next rc number by finding the highest existing rc tag
-            latest_rc=$(git tag --list "${version}-rc.*" | sort --field-separator . --key 4 --numeric-sort | tail -1)
+          prerelease="${{ inputs.prerelease }}"
 
-            if [ -n "$latest_rc" ]; then
-              rc_number=$(( ${latest_rc##*-rc.} + 1 ))
+          if [ "${prerelease}" != "none" ]; then
+            # Determine the next pre-release number by finding the highest existing tag with this suffix
+            latest_pre=$(git tag --list "${version}-${prerelease}.*" | sort --field-separator . --key 4 --numeric-sort | tail -1)
+
+            if [ -n "$latest_pre" ]; then
+              pre_number=$(( ${latest_pre##*-${prerelease}.} + 1 ))
             else
-              rc_number=1
+              pre_number=1
             fi
 
-            release_version="${version}-rc.${rc_number}"
+            release_version="${version}-${prerelease}.${pre_number}"
           else
             release_version="${version}"
           fi
@@ -96,7 +114,7 @@ jobs:
 
           commit_message="chore(release): Release ${release_version}"
 
-          git-cliff --output CHANGELOG.md --bump ${{ inputs.force-bump }} --with-commit "${commit_message}" --github-token ${{ secrets.GITHUB_TOKEN }}
+          git-cliff --output CHANGELOG.md --bump ${bump_flag} --with-commit "${commit_message}" --github-token ${{ secrets.GITHUB_TOKEN }}
 
           git add CHANGELOG.md
 
@@ -113,6 +131,18 @@ jobs:
         run: |
           branch="${{ steps.release.outputs.branch }}"
           release_version="${{ steps.release.outputs.release_version }}"
+
+          # Truncate diff-CHANGELOG.md if it exceeds GitHub's PR character body limit
+          max_length=65536
+          truncation_message=$'\n\n---\n\n> **Note:** Changelog was truncated because it exceeded GitHub'"'"'s 65,536 character limit.'
+          file_length=$(wc --chars < diff-CHANGELOG.md)
+
+          if [ "$file_length" -gt "$max_length" ]; then
+            truncated_length=$(( max_length - ${#truncation_message} ))
+            head --bytes="$truncated_length" diff-CHANGELOG.md > diff-CHANGELOG-truncated.md
+            printf '%s' "$truncation_message" >> diff-CHANGELOG-truncated.md
+            mv diff-CHANGELOG-truncated.md diff-CHANGELOG.md
+          fi
 
           # Check if a PR already exists for this branch
           existing_pr=$(gh pr list --head "${branch}" --state open --json number --jq '.[0].number // empty')

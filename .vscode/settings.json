@@ -11,5 +11,6 @@
         // "RUSTC_BOOTSTRAP": "1",
         "RUST_LOG": "DEBUG,matter_hub=TRACE"
     },
-    "rust-analyzer.rustfmt.extraArgs": ["+nightly"]
+    "rust-analyzer.rustfmt.extraArgs": ["+nightly"],
+    "rust-analyzer.server.extraEnv": {}
 }

@@ -3,8 +3,10 @@ name: Graduate Release
 
 on:
   pull_request:
-    types: [closed]
-    branches: [main]
+    types:
+      - closed
+    branches:
+      - main
 
 permissions:
   contents: write # to create tags
@@ -28,14 +30,15 @@ jobs:
           BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           # release/v0.0.3-rc.1 -> v0.0.3-rc.1
+          # release/v0.0.3-alpha.1 -> v0.0.3-alpha.1
           # release/v0.0.3 -> v0.0.3
           tag="${BRANCH#release/}"
           echo "tag=$tag" >> "${GITHUB_OUTPUT}"
 
-          if [[ "$tag" == *-rc.* ]]; then
-            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
-          else
+          if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "prerelease=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Checkout
@@ -50,29 +53,62 @@ jobs:
         env:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
-          git config --global user.name github-actions[bot]
-          git config --global user.email 41898282+github-actions[bot]@users.noreply.github.com
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep --quiet "refs/tags/${TAG}$"; then
+            echo "Tag ${TAG} already exists remotely, skipping creation"
+          else
+            git config --global user.name github-actions[bot]
+            git config --global user.email 41898282+github-actions[bot]@users.noreply.github.com
 
-          git tag "${TAG}" --message "chore(release): Release ${TAG}"
-          git push origin "${TAG}"
+            git tag "${TAG}" --message "chore(release): Release ${TAG}"
+            git push origin "${TAG}"
+          fi
+
+      - name: Check if release exists
+        id: check_release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if gh release view "${TAG}" &>/dev/null; then
+            echo "Release ${TAG} already exists, bailing"
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Install git-cliff to generate changelog
-        uses: taiki-e/install-action@94cb46f8d6e437890146ffbd78a778b78e623fb2 # v2.74.0
+        if: steps.check_release.outputs.exists == 'false'
+        uses: taiki-e/install-action@8002e0e61dfa209f5a4071401b4662c95b4e2ead # v2.74.1
         with:
           tool: git-cliff
 
       - name: Generate release notes
+        if: steps.check_release.outputs.exists == 'false'
         shell: bash
         run: |
           git-cliff --output release-notes.md --current --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub release
+        if: steps.check_release.outputs.exists == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.TOKEN_TO_TRIGGER_SUBSEQUENT_WORKFLOWS }}
           TAG: ${{ steps.release.outputs.tag }}
           PRERELEASE: ${{ steps.release.outputs.prerelease }}
         run: |
+          # Truncate release-notes.md if it exceeds GitHub Release character body limit
+          max_length=125000
+          truncation_message=$'\n\n---\n\n> **Note:** Release notes were truncated because they exceeded GitHub'"'"'s 125,000 character limit.'
+          file_length=$(wc --chars < release-notes.md)
+
+          if [ "$file_length" -gt "$max_length" ]; then
+            truncated_length=$(( max_length - ${#truncation_message} ))
+            head --bytes="$truncated_length" release-notes.md > release-notes-truncated.md
+            printf '%s' "$truncation_message" >> release-notes-truncated.md
+            mv release-notes-truncated.md release-notes.md
+          fi
+
           prerelease_flag=""
           if [ "${PRERELEASE}" == "true" ]; then
             prerelease_flag="--prerelease"
@@ -81,9 +117,11 @@ jobs:
           gh release create "${TAG}" \
             --notes-file release-notes.md \
             --title "${TAG}" \
+            --verify-tag \
             ${prerelease_flag}
 
       - name: Close stale release PRs
+        if: steps.check_release.outputs.exists == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -93,6 +131,6 @@ jobs:
             --state open \
             --json number,headRefName \
             --jq '.[] | select(.headRefName | startswith("release/v")) | .number' \
-          | while read pr_number; do
+          | while IFS= read -r pr_number; do
             gh pr close "$pr_number" --delete-branch
           done

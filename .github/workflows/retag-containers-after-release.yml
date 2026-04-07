@@ -1,16 +1,20 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
-name: Update semantic tags on repo & image after release
+name: Retag container after release
 
 on:
   release:
-    types: [released, prereleased]
+    types:
+      - released
+      - prereleased
 
 concurrency:
   group: "${{ github.workflow }}"
   cancel-in-progress: false # last one must win in case of multiple releases
 
 permissions:
+  attestations: write
   contents: write
+  id-token: write
   packages: write
 
 env:
@@ -19,6 +23,7 @@ env:
   REGISTRY: ghcr.io
   # github.repository as <account>/<repo>
   IMAGE_NAME: ${{ github.repository }}
+  DOCKERHUB_IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE_NAME }}
 
 jobs:
   repo-has-container:
@@ -43,53 +48,8 @@ jobs:
     if: |
       fromJSON(needs.repo-has-container.outputs.has_container) == true
     steps:
-      - name: Download crane tar, extract, and add folder to path.
-        shell: bash
-        run: |
-          # name of the file in releases we're looking for
-          file_name=go-containerregistry_Linux_x86_64.tar.gz
-
-          # temp location
-          temp_path=$(mktemp --directory --tmpdir=${RUNNER_TEMP})
-
-          # where to download the releases to
-          json_path=${temp_path}/releases.json
-
-          # where to download the archive to
-          archive_path=${temp_path}/${file_name}
-
-          url_to_krane=$(wget \
-              --output-document=- \
-              --timeout=10 \
-              --waitretry=3 \
-              --retry-connrefused \
-              --progress=dot:mega \
-              "https://api.github.com/repos/google/go-containerregistry/releases/latest" \
-              | jq \
-                  --raw-output \
-                  ".assets.[] | select(.browser_download_url | contains(\"${file_name}\")) | .browser_download_url")
-
-          wget \
-            --output-document=- \
-            --timeout=10 \
-            --waitretry=3 \
-            --retry-connrefused \
-            --progress=dot:mega \
-            "${url_to_krane}" \
-            | tar \
-                --directory=${temp_path}/ \
-                --strip-components=0 \
-                --no-overwrite-dir \
-                --extract \
-                --verbose \
-                --gunzip \
-                --file=-
-
-          # append to path
-          echo "${temp_path}" >> ${GITHUB_PATH}
-
       - name: Set up Docker
-        uses: docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4 # v4.7.0
+        uses: docker/setup-docker-action@1a6edb0ba9ac496f6850236981f15d8f9a82254d # v5.0.0
         with:
           daemon-config: |
             {
@@ -99,48 +59,120 @@ jobs:
             }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log into registry ${{ env.REGISTRY }}
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           password: ${{ secrets.GITHUB_TOKEN }}
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
 
+      - name: Log into Docker Hub
+        if: env.DOCKERHUB_IMAGE_NAME != ''
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Set full image name
         shell: bash
         run: |
-          echo "FULL_IMAGE_NAME=${REGISTRY,,}/${IMAGE_NAME,,}" >> ${GITHUB_ENV}
+          echo "FULL_IMAGE_NAME=${REGISTRY,,}/${IMAGE_NAME,,}" >> "${GITHUB_ENV}"
+          echo "FULL_DOCKERHUB_IMAGE_NAME=docker.io/${DOCKERHUB_IMAGE_NAME,,}" >> "${GITHUB_ENV}"
 
-      - name: Find all tags for ${{ env.FULL_IMAGE_NAME }}
+      - name: Find source tag using GitHub CLI
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          crane ls ${FULL_IMAGE_NAME} >> existing_tags
+          repo="${{ github.repository }}"
+          repo_lower="${repo,,}"
 
-          echo "These are the existing tags on ${FULL_IMAGE_NAME}:"
-          cat existing_tags
+          OLD_TAG=$(gh api /users/${{ github.repository_owner }}/packages/container/${repo_lower##*/}/versions \
+            --paginate \
+            --jq '.[] | .metadata.container.tags[]' | grep "^sha-${{ github.sha }}-.*\$" | head --lines 1) # .* is actual or retag
 
-      - name: Check if the incoming PR has a Docker container, which will be our old tag
-        shell: bash
-        run: |
-          old_tag=$(cat existing_tags | grep "^sha-${{ github.sha }}-.*\$") # .* is actual or retag
+          if [ -z "${OLD_TAG}" ]; then
+            echo "::error::No matching source tag found for SHA ${{ github.sha }}"
+            exit 1
+          fi
 
-          echo "OLD_TAG=${old_tag}" >> ${GITHUB_ENV}
+          echo "OLD_TAG=${OLD_TAG}" >> "${GITHUB_ENV}"
 
       - name: Set the new TAGs
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
           images: "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           tags: |
             type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
-            type=semver,pattern=v{{version}}
+            type=semver,pattern={{version}},prefix=v
+
+      - name: Set the new Docker Hub TAGs
+        if: env.DOCKERHUB_IMAGE_NAME != ''
+        id: meta-dockerhub
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: "docker.io/${{ env.DOCKERHUB_IMAGE_NAME }}"
+          tags: |
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+            type=semver,pattern={{version}},prefix=v
+
+      - name: Get image digest
+        shell: bash
+        id: digest
+        run: |
+          digest=$(docker buildx imagetools inspect "${FULL_IMAGE_NAME}:${OLD_TAG}" --format "{{json .}}" | jq --raw-output ".manifest.digest")
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Actually re-tag the container
         shell: bash
         run: |
-          echo "${{ steps.meta.outputs.tags }}" | while read new_tag
-          do
-            docker buildx imagetools create --tag ${new_tag} "${FULL_IMAGE_NAME}:${OLD_TAG}"
+          echo "${{ steps.meta.outputs.tags }}" | while IFS= read -r new_tag
+            do
+              docker buildx imagetools create --tag "${new_tag}" "${FULL_IMAGE_NAME}:${OLD_TAG}"
           done
+
+      - name: Attest GHCR image
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ env.FULL_IMAGE_NAME }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Copy the container to Docker Hub
+        if: env.DOCKERHUB_IMAGE_NAME != ''
+        shell: bash
+        run: |
+          echo "${{ steps.meta-dockerhub.outputs.tags }}" | while IFS= read -r new_tag
+            do
+              skopeo copy --all --preserve-digests "docker://${FULL_IMAGE_NAME}:${OLD_TAG}" "docker://${new_tag}"
+          done
+
+      - name: Attest Docker Hub image
+        if: env.DOCKERHUB_IMAGE_NAME != ''
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ env.FULL_DOCKERHUB_IMAGE_NAME }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Docker Scout (linux/amd64)
+        uses: docker/scout-action@8910519cee8ac046f3ee99686b0dc6654d5ba1a7 # v1.20.3
+        with:
+          command: cves
+          image: "${{ env.FULL_IMAGE_NAME }}@${{ steps.digest.outputs.digest }}"
+          platform: linux/amd64
+          dockerhub-user: ${{ vars.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker Scout (linux/arm64)
+        uses: docker/scout-action@8910519cee8ac046f3ee99686b0dc6654d5ba1a7 # v1.20.3
+        with:
+          command: cves
+          image: "${{ env.FULL_IMAGE_NAME }}@${{ steps.digest.outputs.digest }}"
+          platform: linux/arm64
+          dockerhub-user: ${{ vars.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}

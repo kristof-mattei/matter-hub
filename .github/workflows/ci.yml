@@ -27,13 +27,13 @@ env:
     amd64
     amd64/v2
     amd64/v3
-  # Use docker.io for Docker Hub if empty
   REGISTRY: ghcr.io
 
 jobs:
   architectures:
     name: Build matrix
     runs-on: ubuntu-slim
+    if: ${{ !startsWith(github.head_ref, 'release/') }}
     outputs:
       architectures: ${{ steps.matrix.outputs.architectures }}
     steps:
@@ -50,6 +50,7 @@ jobs:
 
   rust-build:
     name: Build Rust code
+    if: ${{ !startsWith(github.head_ref, 'release/') }}
     uses: ./.github/workflows/rust.yml
     secrets: inherit
     permissions:
@@ -61,6 +62,7 @@ jobs:
   repo-has-container:
     name: Repo has container?
     runs-on: ubuntu-slim
+    if: ${{ !startsWith(github.head_ref, 'release/') }}
     outputs:
       has_container: ${{ steps.determine.outputs.has_container }}
     steps:
@@ -74,6 +76,7 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-slim
+    if: ${{ !startsWith(github.head_ref, 'release/') }}
     permissions:
       contents: read
       pull-requests: read
@@ -88,7 +91,7 @@ jobs:
           show-progress: false
 
       - name: Check if we actually made changes
-        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -119,7 +122,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install git-cliff to generate changelog & next version number
-        uses: taiki-e/install-action@94cb46f8d6e437890146ffbd78a778b78e623fb2 # v2.74.0
+        uses: taiki-e/install-action@8002e0e61dfa209f5a4071401b4662c95b4e2ead # v2.74.1
         with:
           tool: git-cliff
 
@@ -127,10 +130,18 @@ jobs:
         shell: bash
         id: version
         run: |
-          version=$(git-cliff --bumped-version --unreleased --github-token ${{ secrets.GITHUB_TOKEN }})
+          latest_tag=$(git describe --tags --abbrev=0 || true)
+          bumped=$(git-cliff --bumped-version --unreleased --github-token ${{ secrets.GITHUB_TOKEN }})
+
+          # If git-cliff didn't bump (e.g. chore/ci only commits), force a patch increment
+          # so we never tag a Docker image with the same version as the last release.
+          if [ "${bumped}" = "${latest_tag}" ]; then
+            bumped=$(git-cliff --bumped-version --bump patch --unreleased --github-token ${{ secrets.GITHUB_TOKEN }})
+            echo "Force bumping to ${bumped}"
+          fi
 
           # remove v
-          version="${version//v/}"
+          version="${bumped//v/}"
 
           # store
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
@@ -142,6 +153,7 @@ jobs:
       application_name: ${{ steps.variables.outputs.application_name }}
       description: ${{ steps.variables.outputs.description }}
       full_image_name_remote_registry: ${{ steps.variables.outputs.full_image_name_remote_registry }}
+      full_image_name_cache_registry: ${{ steps.variables.outputs.full_image_name_cache_registry }}
       full_image_name_local_registry: ${{ steps.variables.outputs.full_image_name_local_registry }}
       registry: ${{ steps.variables.outputs.registry }}
       unique_tag: ${{ steps.variables.outputs.unique_tag }}
@@ -152,45 +164,8 @@ jobs:
     steps:
       - *checkout
 
-      - name: Cache cargo
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        env:
-          CACHE_NAME: cargo
-        with:
-          path: |
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-${{ github.workflow }}-${{ github.job }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-${{ github.workflow }}-
-            ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-${{ hashFiles('Cargo.lock') }}-
-            ${{ runner.os }}-${{ runner.arch }}-build-${{ env.CACHE_NAME }}-
-
-      - &set_up_mold
-        name: Set up mold
-        uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
-
-      - &set_up_toolchain
-        name: Set up toolchain
-        shell: bash
-        run: |
-          rm ${HOME}/.cargo/bin/cargo-fmt
-          rm ${HOME}/.cargo/bin/rust-analyzer
-          rm ${HOME}/.cargo/bin/rustfmt
-
-          rustup self update
-          rustup update
-          rustup show active-toolchain || rustup toolchain install
-          rustup show
-
-          cargo --version
-
       - name: Install cargo-edit to do set-version
-        uses: taiki-e/install-action@94cb46f8d6e437890146ffbd78a778b78e623fb2 # v2.74.0
+        uses: taiki-e/install-action@8002e0e61dfa209f5a4071401b4662c95b4e2ead # v2.74.1
         with:
           tool: cargo-edit
 
@@ -207,7 +182,7 @@ jobs:
           git diff > /tmp/version-bump.patch
 
       - name: Upload version bump patch
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           if-no-files-found: error
           name: version-bump-patch
@@ -247,12 +222,14 @@ jobs:
           image_name=${image_name,,}
           echo "full_image_name_remote_registry=${registry}/${image_name}" >> "${GITHUB_OUTPUT}"
 
+          # The cache registry, separate from the main image registry
+          echo "full_image_name_cache_registry=${registry}/${image_name}-cache" >> "${GITHUB_OUTPUT}"
+
           # The local registry to which we'll push
           local_registry=localhost:5000
           local_registry=${local_registry,,}
           echo "full_image_name_local_registry=${local_registry}/${image_name}" >> "${GITHUB_OUTPUT}"
 
-  # this name is also used in `publish-crate-after-release.yml`
   docker-build:
     name: Build Docker container on ${{ matrix.runs-on }} for ${{ matrix.platform }}
     strategy:
@@ -281,18 +258,10 @@ jobs:
       - *checkout
 
       - name: Download version bump patch
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: version-bump-patch
-          path: /tmp/
-
-      - name: Apply version bump patch
-        shell: bash
-        run: |
-          git apply /tmp/version-bump.patch
-
-          echo "Applied patch:"
-          git diff
+          path: .
 
       # TODO validate no changes between github.event.pull_request.head.sha and the actual current sha (representing the hypothetical merge)
       - name: Set variables
@@ -308,8 +277,13 @@ jobs:
           unique_tag_arch=${{ needs.docker-prepare-variables.outputs.unique_tag }}-${platform_no_slashes}
           echo "unique_tag_arch=${unique_tag_arch}" >> "${GITHUB_OUTPUT}"
 
+          runner_arch="${{ runner.arch }}"
+          runner_arch="${runner_arch,,}"
+          echo "buildcache_pr_ref=${{ needs.docker-prepare-variables.outputs.full_image_name_cache_registry }}:buildcache-pr-${{ github.event.pull_request.number }}-${runner_arch}-${platform_no_slashes}" >> "${GITHUB_OUTPUT}"
+          echo "buildcache_main_ref=${{ needs.docker-prepare-variables.outputs.full_image_name_cache_registry }}:buildcache-main-${runner_arch}-${platform_no_slashes}" >> "${GITHUB_OUTPUT}"
+
       - name: Set up Docker
-        uses: docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4 # v4.7.0
+        uses: docker/setup-docker-action@1a6edb0ba9ac496f6850236981f15d8f9a82254d # v5.0.0
         with:
           daemon-config: |
             {
@@ -319,10 +293,10 @@ jobs:
             }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log into registry ${{ needs.docker-prepare-variables.outputs.registry }}
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           password: ${{ secrets.GITHUB_TOKEN }}
           registry: ${{ needs.docker-prepare-variables.outputs.registry }}
@@ -341,41 +315,50 @@ jobs:
           fi
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
         if: fromJSON(steps.setup_qemu.outputs.setup_qemu) == true
         with:
           platforms: linux/${{ matrix.platform }}
+          cache-image: false
 
       - name: Extract Docker metadata
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         id: meta
         with:
+          annotations: |
+            org.opencontainers.image.description=${{ needs.docker-prepare-variables.outputs.description }} (${{ matrix.platform }})
+            org.opencontainers.image.revision=${{ github.event.pull_request.base.sha }}-${{ github.event.pull_request.head.sha }}
+            org.opencontainers.image.source=${{ github.event.pull_request.html_url }}
+            org.opencontainers.image.version=v${{ needs.calculate-version.outputs.version }}
           labels: |
             org.opencontainers.image.description=${{ needs.docker-prepare-variables.outputs.description }} (${{ matrix.platform }})
             org.opencontainers.image.revision=${{ github.event.pull_request.base.sha }}-${{ github.event.pull_request.head.sha }}
             org.opencontainers.image.source=${{ github.event.pull_request.html_url }}
-            org.opencontainers.image.version=pr-${{ github.event.number }}
+            org.opencontainers.image.version=v${{ needs.calculate-version.outputs.version }}
           images: ${{ needs.docker-prepare-variables.outputs.full_image_name_local_registry }}
           tags: |
             type=raw,value=${{ steps.variables.outputs.unique_tag_arch }}
 
       - name: Build Docker image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           build-args: |
             APPLICATION_NAME=${{ needs.docker-prepare-variables.outputs.application_name }}
           context: .
           # this container is THE PR's artifact, and we will re-tag it
           # once the PR has been accepted
-          cache-from: type=registry,ref=${{ needs.docker-prepare-variables.outputs.full_image_name_remote_registry }}-cache:${{ needs.docker-prepare-variables.outputs.application_name }}-buildcache-${{ runner.arch }}-${{ steps.variables.outputs.platform_no_slashes }}
-          cache-to: type=registry,ref=${{ needs.docker-prepare-variables.outputs.full_image_name_remote_registry }}-cache:${{ needs.docker-prepare-variables.outputs.application_name }}-buildcache-${{ runner.arch }}-${{ steps.variables.outputs.platform_no_slashes }},mode=max
+          cache-from: |
+            type=registry,ref=${{ steps.variables.outputs.buildcache_pr_ref }}
+            type=registry,ref=${{ steps.variables.outputs.buildcache_main_ref }}
+          cache-to: type=registry,ref=${{ steps.variables.outputs.buildcache_pr_ref }},mode=max
+          annotations: ${{ steps.meta.outputs.annotations }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=oci,dest=/tmp/${{ steps.variables.outputs.unique_tag_arch }}.tar
           platforms: linux/${{ matrix.platform }}
           tags: ${{ steps.meta.outputs.tags }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         if: |
           matrix.runs-on == 'ubuntu-latest'
         with:
@@ -397,6 +380,7 @@ jobs:
     permissions:
       packages: write
     needs:
+      - calculate-version
       - docker-prepare-variables
       - docker-build
       - rust-build
@@ -406,7 +390,7 @@ jobs:
       github.event_name == 'pull_request'
     steps:
       - name: Set up Docker
-        uses: docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4 # v4.7.0
+        uses: docker/setup-docker-action@1a6edb0ba9ac496f6850236981f15d8f9a82254d # v5.0.0
         with:
           daemon-config: |
             {
@@ -416,31 +400,31 @@ jobs:
             }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log into registry ${{ needs.docker-prepare-variables.outputs.registry }}
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ needs.docker-prepare-variables.outputs.registry }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract Docker metadata
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         id: meta
         with:
-          images: ${{ needs.docker-prepare-variables.outputs.full_image_name_remote_registry }}
-          labels: |
+          annotations: |
             org.opencontainers.image.description=${{ needs.docker-prepare-variables.outputs.description }}
             org.opencontainers.image.revision=${{ github.event.pull_request.base.sha }}-${{ github.event.pull_request.head.sha }}
             org.opencontainers.image.source=${{ github.event.pull_request.html_url }}
-            org.opencontainers.image.version=pr-${{ github.event.number }}
+            org.opencontainers.image.version=v${{ needs.calculate-version.outputs.version }}
+          images: ${{ needs.docker-prepare-variables.outputs.full_image_name_remote_registry }}
           tags: |
             type=raw,value=${{ needs.docker-prepare-variables.outputs.unique_tag }}
             type=ref,event=pr,suffix=-latest
 
       - name: Download artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         id: artifact
         with:
           merge-multiple: true
@@ -464,15 +448,18 @@ jobs:
             platforms+=("$full_name_with_platform")
           done <<< "${{ env.IMAGE_VARIANTS }}"
 
-          new_labels=()
-          while IFS= read -r label; do
-            new_labels+=(--annotation)
-            new_labels+=("index:${label}")
-          done <<< "${{ steps.meta.outputs.labels }}"
+          new_annotations=()
+          while IFS= read -r annotation; do
+            [[ -z "${annotation}" ]] && continue
+            # imagetools create builds an index; convert manifest-level annotations to index-level
+            annotation="${annotation/manifest:/index:}"
+            new_annotations+=(--annotation)
+            new_annotations+=("${annotation}")
+          done <<< "${{ steps.meta.outputs.annotations }}"
 
           # merge the platform containers in a new multiplatform one
-          # with the new labels, and push it to our local registry
-          docker buildx imagetools create "${new_labels[@]}" --tag "${{ needs.docker-prepare-variables.outputs.full_image_name_local_registry }}:${{ needs.docker-prepare-variables.outputs.unique_tag }}" \
+          # with the new annotations, and push it to our local registry
+          docker buildx imagetools create "${new_annotations[@]}" --tag "${{ needs.docker-prepare-variables.outputs.full_image_name_local_registry }}:${{ needs.docker-prepare-variables.outputs.unique_tag }}" \
             "${platforms[@]}"
 
           echo "Inspecting ${{ needs.docker-prepare-variables.outputs.full_image_name_local_registry }}:${{ needs.docker-prepare-variables.outputs.unique_tag }}:"
@@ -489,18 +476,11 @@ jobs:
       - name: Push from local registry to remote with new tags
         shell: bash
         run: |
-          new_tags=()
+          source="docker://${{ needs.docker-prepare-variables.outputs.full_image_name_local_registry }}:${{ needs.docker-prepare-variables.outputs.unique_tag }}"
+
           while IFS= read -r tag; do
-            new_tags+=(--tag)
-            new_tags+=("${tag}")
+            skopeo copy --all --preserve-digests --src-tls-verify=false --command-timeout 70s --retry-times 5 "${source}" "docker://${tag}"
           done <<< "${{ steps.meta.outputs.tags }}"
-
-          until timeout --kill-after=70 60 docker buildx imagetools create "${new_tags[@]}" \
-            "${{ needs.docker-prepare-variables.outputs.full_image_name_local_registry }}:${{ needs.docker-prepare-variables.outputs.unique_tag }}"; do
-            echo "Timeout exceeded / command failed, trying again..."
-
-            sleep 2
-          done
 
       - name: Inspect new remote tags
         shell: bash
@@ -508,11 +488,7 @@ jobs:
           while IFS= read -r new_tag; do
             echo "Inspecting ${new_tag}:"
 
-            until timeout --kill-after=70 60 docker buildx imagetools inspect --raw "${new_tag}"; do
-              echo "Timeout exceeded / command failed, trying again..."
-
-              sleep 2
-            done
+            skopeo inspect --raw --command-timeout 70s --retry-times 5 "docker://${new_tag}"
 
             # empty to get newline
             echo ""
@@ -526,6 +502,7 @@ jobs:
       attestations: write
       id-token: write
       packages: write
+      pull-requests: write
     needs:
       - docker-prepare-variables
       - docker-build
@@ -536,7 +513,7 @@ jobs:
       github.event_name == 'pull_request'
     steps:
       - name: Set up Docker
-        uses: docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4 # v4.7.0
+        uses: docker/setup-docker-action@1a6edb0ba9ac496f6850236981f15d8f9a82254d # v5.0.0
         with:
           daemon-config: |
             {
@@ -546,10 +523,10 @@ jobs:
             }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log into registry ${{ needs.docker-prepare-variables.outputs.registry }}
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ needs.docker-prepare-variables.outputs.registry }}
           username: ${{ github.actor }}
@@ -559,12 +536,34 @@ jobs:
       # since we deal with tags (mutable), and the way to get a digest is to use the tag, I prefer
       # sourcing the digest from the local registry we just spun up (trusted)
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         id: attestation
         with:
           subject-name: ${{ needs.docker-prepare-variables.outputs.full_image_name_remote_registry }}
           subject-digest: ${{ needs.docker-publish.outputs.digest }}
           push-to-registry: true
+
+      - name: Docker Scout Compare (linux/amd64)
+        uses: docker/scout-action@8910519cee8ac046f3ee99686b0dc6654d5ba1a7 # v1.20.3
+        with:
+          command: compare
+          image: "${{ needs.docker-prepare-variables.outputs.full_image_name_remote_registry }}:pr-${{ github.event.pull_request.number }}-latest"
+          platform: linux/amd64
+          to: "${{ needs.docker-prepare-variables.outputs.full_image_name_remote_registry }}:edge"
+          dockerhub-user: ${{ vars.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          organization: ${{ vars.DOCKERHUB_USERNAME }}
+
+      - name: Docker Scout Compare (linux/arm64)
+        uses: docker/scout-action@8910519cee8ac046f3ee99686b0dc6654d5ba1a7 # v1.20.3
+        with:
+          command: compare
+          image: "${{ needs.docker-prepare-variables.outputs.full_image_name_remote_registry }}:pr-${{ github.event.pull_request.number }}-latest"
+          platform: linux/arm64
+          to: "${{ needs.docker-prepare-variables.outputs.full_image_name_remote_registry }}:edge"
+          dockerhub-user: ${{ vars.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          organization: ${{ vars.DOCKERHUB_USERNAME }}
 
   all-done:
     name: All done
